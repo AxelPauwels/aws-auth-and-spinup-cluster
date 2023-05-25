@@ -1,0 +1,6 @@
+#hidden system files
+.DS_Store
+Thumbs.db
+
+#personal IDE config files
+.idea/
