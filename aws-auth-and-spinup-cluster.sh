@@ -136,7 +136,7 @@ getExistingCredentials() {
     return 1
   fi
 
-  msg_status "Reading file"
+  msg_status "Reading credentials"
   msg_debug "Start reading credential file"
 
   # Overwrite the output file if it exists
@@ -146,15 +146,12 @@ getExistingCredentials() {
   fi
 
   # Process the file and write filtered lines to the output file
+  msg_status "Writing filtered credentials"
+
   while IFS= read -r line; do
-    if [[ $line =~ ^\[[^\]]*Role\]$ || -z $line ]]; then
+    if [[ $line =~ \[[^]]+\] || -z $line ]]; then
       # Extract the role name
       role_name=$(sed -n 's/^\[\([^]]*\)\]$/\1/p' <<<"$line")
-    elif [[ $line =~ ^\[NIKE\. ]]; then
-      # Write the line to the output file
-      msg_debug "Write the line to the output file"
-      msg_status "Writing to file"
-      echo "$line" >>"$output_file"
     elif [[ $line =~ ^x_security_token_expires ]]; then
       # Extract the x_security_token_expires value
       token_timestamp=$(awk -F "=" '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' <<<"$line")
