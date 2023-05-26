@@ -36,7 +36,7 @@ new_line() {
 }
 
 msg() {
-  echo "$*" >&2
+  echo -e "$*" >&2
 }
 
 msg_yellow() {

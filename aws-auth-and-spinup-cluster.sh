@@ -12,7 +12,7 @@ init() {
   DEBUG_MODE=0 # set to 1 to see logging in terminal
   AWS_CREDENTIALS_PATH="$HOME/.aws/credentials"
   AWS_FILTERED_CREDENTIALS_PATH="${AWS_CREDENTIALS_PATH%/*}/filtered_credentials.txt" # based on previous variable, never change this
-  SERVER_TIME_OFFSET="-2H"                                                            # TODO: fix this depending on server time ?
+  TIMEZONE="Europe/Brussels"
   CURRENT_ROLE="none"
   TEAM_NAME="none"
   CREATE_CLUSTER_SCRIPT_PATH="$HOME/awsEmrClusterConfigs/emr-create-cluster.sh"
@@ -24,8 +24,8 @@ authenticateToAWS() {
   msg_debug "[authenticateToAWS]"
 
   if command_exists gimme-aws-creds; then
-    msg_debug "Executing 'gimme-aws-creds'"
     msg_status "Start authentication"
+    msg_debug "Executing 'gimme-aws-creds'"
     gimme-aws-creds
   else
     msg_error "Cannot run command 'gimme-aws-creds' (not installed)"
@@ -36,19 +36,83 @@ checkIfAuthenticatedWithCurrentRole() {
   msg_title "Checking your Authenticated Role"
   msg_debug "[checkIfAuthenticatedWithCurrentRole]"
 
-  msg_debug "Executing 'aws s3 ls --profile $CURRENT_ROLE"
   msg_status "Checking your role on aws"
+  msg_debug "Executing 'aws s3 ls --profile $CURRENT_ROLE"
 
   result=$(aws s3 ls --profile $CURRENT_ROLE 2>/dev/null)
 
   if [ $? -ne 0 ]; then
-    msg_debug "Execution of 'aws s3 ls --profile $CURRENT_ROLE': Error: not correct profile"
     msg_error "You are not authenticated with role '$CURRENT_ROLE' on aws"
+    msg_debug "Execution of 'aws s3 ls --profile $CURRENT_ROLE': Error: not correct profile"
     return 1 # false
   else
-    msg_debug "Execution of 'aws s3 ls --profile $CURRENT_ROLE': Success"
     msg_success "You are authenticated with role '$CURRENT_ROLE' on aws"
+    msg_debug "Execution of 'aws s3 ls --profile $CURRENT_ROLE': Success"
     return 0 # true
+  fi
+}
+
+# params: timestamp-string
+# returns: a human readable string like or 'expired' when it's in the past
+getTimeDifferenceOrExpired() {
+  msg_debug "[getTimeDifferenceFromToken]"
+
+  local expiration_timestamp="$1"
+
+  # Current timestamp in your local timezone
+  current_timestamp=$(TZ="$TIMEZONE" date +"%Y-%m-%dT%H:%M:%S")
+
+  # Convert the token timestamp to UTC by stripping the timezone offset
+  token_timestamp=${expiration_timestamp%+*}
+
+  # Convert timestamps to Unix timestamps
+  current_unix_timestamp=$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "$current_timestamp" +"%s")
+  token_unix_timestamp=$(date -u -j -f "%Y-%m-%dT%H:%M:%S" "$token_timestamp" +"%s")
+
+  # Calculate time difference in seconds
+  time_difference=$((token_unix_timestamp - current_unix_timestamp))
+
+  # Check if the time difference is in the past
+  if [[ $time_difference -lt 0 ]]; then
+    echo "expired"
+    exit 0
+  fi
+
+  # Calculate the number of years, days, hours, and minutes in the time difference
+  years=$((time_difference / 31536000))
+  days=$((time_difference / 86400))
+  hours=$(((time_difference % 86400) / 3600))
+  minutes=$(((time_difference % 3600) / 60))
+
+  # Prepare the time difference string
+  time_difference_string=""
+
+  # Add years to the time difference string if it is nonzero
+  if [[ $years -gt 0 ]]; then
+    time_difference_string+=" $years years,"
+  fi
+
+  # Add days to the time difference string if it is nonzero
+  if [[ $days -gt 0 ]]; then
+    time_difference_string+=" $days days,"
+  fi
+
+  # Add hours to the time difference string if it is nonzero
+  if [[ $hours -gt 0 ]]; then
+    time_difference_string+=" $hours hours,"
+  fi
+
+  # Add minutes to the time difference string
+  time_difference_string+=" $minutes minutes"
+
+  # Trim leading whitespace from the time difference string
+  time_difference_string="${time_difference_string#"${time_difference_string%%[![:space:]]*}"}"
+
+  # Display the time difference or "IN THE PAST" if applicable
+  if [[ -z $time_difference_string ]]; then
+    echo "expired"
+  else
+    echo "$time_difference_string"
   fi
 }
 
@@ -93,27 +157,9 @@ getExistingCredentials() {
       echo "$line" >>"$output_file"
     elif [[ $line =~ ^x_security_token_expires ]]; then
       # Extract the x_security_token_expires value
-      expires_line=$(awk -F "=" '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' <<<"$line")
-
-      # Strip the timezone offset from the timestamp
-      expires_stripped=${expires_line%+*}
-
-      # Calculate the time difference in seconds
-      # time_diff=$(($(date -j -f "%Y-%m-%dT%H:%M:%S" "$expires_stripped" +"%s") - $(date +"%s")))
-      time_diff=$(($(date -j -f "%Y-%m-%dT%H:%M:%S" "$expires_stripped" +"%s") - $(date -v$SERVER_TIME_OFFSET +"%s")))
-
-      if [[ $time_diff -gt 0 ]]; then
-        # Format the time difference in days, hours, and minutes
-        days=$((time_diff / 86400))
-        hours=$((time_diff % 86400 / 3600))
-        minutes=$((time_diff % 3600 / 60))
-
-        echo "$role_name - $days days, $hours hours, $minutes minutes" >>"$output_file"
-        msg_debug "Write role that isn't expired"
-      else
-        echo "$role_name - expired" >>"$output_file"
-        msg_debug "Write role that's expired"
-      fi
+      token_timestamp=$(awk -F "=" '{gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2}' <<<"$line")
+      timediff_or_expired=$(getTimeDifferenceOrExpired "$token_timestamp")
+      echo "$role_name - $timediff_or_expired" >>"$output_file"
     fi
   done <"$input_file"
 
@@ -144,10 +190,10 @@ showMenuToChooseRole() {
       local option="${options[$i]}"
       if [[ $option == *"expired"* ]]; then
         local option_index=$((i + 1))
-        msg_strikethrough "[$option_index] ${option%% -*}${txt_reset} - ${txt_red}${option#* - }${txt_reset}"
+        msg_strikethrough "[$option_index] ${option%% -*}${txt_reset} ${txt_red}Expired${txt_reset}"
       else
         local option_index=$((i + 1))
-        echo "[$option_index] ${option%% -*}"
+        msg "[$option_index] ${option%% -*} ${txt_green}Valid (${option#* - })${txt_reset}"
         valid_options+=("$option_index")
       fi
     done
@@ -186,8 +232,8 @@ showMenuToChooseRole() {
         checkIfAuthenticatedWithCurrentRole
 
         if [ $? -ne 0 ]; then
-          msg_debug "Is NOT the correct role -> authenticate again"
           msg_status "Restart authentication"
+          msg_debug "Is NOT the correct role -> authenticate again"
           authenticateToAWS
         else
           msg_debug "Is the correct role"
